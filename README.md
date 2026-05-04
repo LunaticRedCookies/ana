@@ -10,24 +10,25 @@
 - 条件を満たす戦略がなければシグナルを出しません。
 - 金融リスクがあります。
 
+## CSV必要カラム
+`symbol,timeframe,timestamp,open,high,low,close,volume`
+
+## 研究フロー
+`/v1/import/csv` の後に、`/v1/research/generate-features`、`/v1/research/generate-labels`、`/v1/research/generate-candidates`、`/v1/research/backtest`、`/v1/research/walk-forward`、`/v1/research/monte-carlo`、`/v1/research/promote-strategies` の順で実行します。
+
+特徴量生成とラベル生成は `raw_candles` から決定論的に計算します。同じCSVを再投入した場合、同じ結果が再現される前提です。
+
+1分足CSVの場合、30秒満期ラベルは推定せず `unsupported` として保存します。draw はバックテストで損益0として扱います。
+
+本実装では、バックテスト、ウォークフォワード、モンテカルロ、採用判定でランダム値や仮値を使わない方針です。
+
 ## 起動方法
 ```bash
 pip install -r requirements.txt
 uvicorn app.main:app --reload
 ```
 
-## テスト実行方法
+## テスト
 ```bash
-pytest
+pytest -q
 ```
-
-## サンプルCSVで再現する方法
-`sample_data/candles.csv` を `/v1/import/csv` に投入し、以下を順番に実行します。
-- `/v1/research/generate-candidates`
-- `/v1/research/backtest`
-- `/v1/research/walk-forward`
-- `/v1/research/monte-carlo`
-- `/v1/research/promote-strategies`
-- `/v1/signals/latest`
-
-active strategy が 0 の場合は `現在採用可能な戦略なし` が返ります。
