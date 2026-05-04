@@ -1,34 +1,29 @@
 # Edge Discovery Bot
 
-このシステムは、バイナリーオプション向けに戦略候補を自動生成・検証し、採用条件を満たすものだけをライブ候補として表示する研究支援アプリです。
+このシステムは、戦略候補を生成・検証し、条件を満たすものだけを候補として扱う研究支援アプリです。Bubingaへのログイン、自動クリック、自動発注、画面スクレイピングは実装していません。
 
-## 注意事項
-- このシステムはBubingaを自動操作しません。
-- Bubingaへのログイン、自動クリック、自動発注は実装していません。
-- 実取引の利益を保証しません。
-- バックテスト成績は将来の結果を保証しません。
-- 条件を満たす戦略がなければシグナルを出しません。
-- 金融リスクがあります。
+CSVの必須カラムは `symbol,timeframe,timestamp,open,high,low,close,volume` です。
 
-## CSV必要カラム
-`symbol,timeframe,timestamp,open,high,low,close,volume`
+M1しかないCSVでは、`/v1/research/resample` で M5 と M15 を決定論的に生成します。仕様は、open=期間先頭、high/low=期間内極値、close=期間末尾、volume=期間合計、timestamp=期間開始時刻、不完全期間は破棄です。
 
-## 研究フロー
-`/v1/import/csv` の後に、`/v1/research/generate-features`、`/v1/research/generate-labels`、`/v1/research/generate-candidates`、`/v1/research/backtest`、`/v1/research/walk-forward`、`/v1/research/monte-carlo`、`/v1/research/promote-strategies` の順で実行します。
+特徴量生成では、M1判定に対して直近で確定済みの M5/M15 特徴量だけを参照します。未確定上位足を使わないことで lookahead bias を避けます。
 
-特徴量生成とラベル生成は `raw_candles` から決定論的に計算します。同じCSVを再投入した場合、同じ結果が再現される前提です。
+ラベル生成で1分足を使う場合、30秒満期は unsupported として保存します。60秒満期は次の1分足closeを使う近似です。これは実際のBubinga判定を完全再現するものではありません。
 
-1分足CSVの場合、30秒満期ラベルは推定せず `unsupported` として保存します。draw はバックテストで損益0として扱います。
+`/v1/research/monte-carlo` は、ランダムではなく決定論的ストレス検証を返します。最悪順序のドローダウン、payout率低下シナリオの期待値を計算します。
 
-本実装では、バックテスト、ウォークフォワード、モンテカルロ、採用判定でランダム値や仮値を使わない方針です。
+active strategy が0の状態は正常系です。その場合 `/v1/signals/latest` は `no_active_strategy` を返します。
 
-## 起動方法
+Linux/macOS:
 ```bash
-pip install -r requirements.txt
+python -m pip install -r requirements.txt
+pytest -q
 uvicorn app.main:app --reload
 ```
 
-## テスト
-```bash
+Windows PowerShell:
+```powershell
+python -m pip install -r requirements.txt
 pytest -q
+uvicorn app.main:app --reload
 ```

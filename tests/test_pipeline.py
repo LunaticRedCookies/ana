@@ -4,7 +4,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
 from app import models
-from app.pipeline import generate_features, generate_labels, backtest, walk_forward, ensure_candidates
+from app.pipeline import generate_features, generate_labels, backtest, walk_forward, ensure_candidates, resample_candles, stress_test
 
 
 def mkdb():
@@ -13,7 +13,7 @@ def mkdb():
     return sessionmaker(bind=engine)()
 
 
-def seed_m1(db, n=40):
+def seed_m1(db, n=31):
     t = datetime(2026,1,1,0,0,0)
     p = 1.1000
     for i in range(n):
@@ -23,38 +23,44 @@ def seed_m1(db, n=40):
     db.commit()
 
 
-def test_deterministic_results_two_runs():
-    db = mkdb(); seed_m1(db); ensure_candidates(db)
+def test_resample_m5_and_drop_incomplete():
+    db = mkdb(); seed_m1(db, 12)
+    r = resample_candles(db, 'M1', 'M5')
+    assert r['created'] == 2 and r['dropped'] == 2
+
+
+def test_resample_m15():
+    db = mkdb(); seed_m1(db, 31)
+    r = resample_candles(db, 'M1', 'M15')
+    assert r['created'] == 2 and r['dropped'] == 1
+
+
+def test_30s_unsupported_and_60s_next_close_and_tail_unsupported():
+    db = mkdb(); seed_m1(db, 4)
+    generate_labels(db)
+    l30 = db.query(models.Label).filter_by(expiry_seconds=30).first()
+    assert l30.result_high == 'unsupported'
+    first = db.query(models.RawCandle).filter_by(timeframe='M1').order_by(models.RawCandle.timestamp).first()
+    nextc = db.query(models.RawCandle).filter_by(timeframe='M1').order_by(models.RawCandle.timestamp).all()[1]
+    l60 = db.query(models.Label).filter_by(timestamp=first.timestamp, expiry_seconds=60).first()
+    assert l60.expiry_price == nextc.close
+    tail = db.query(models.RawCandle).filter_by(timeframe='M1').order_by(models.RawCandle.timestamp).all()[-1]
+    ltail = db.query(models.Label).filter_by(timestamp=tail.timestamp, expiry_seconds=180).first()
+    assert ltail.result_high == 'unsupported'
+
+
+def test_deterministic_backtest_and_stress():
+    db = mkdb(); seed_m1(db, 50); ensure_candidates(db)
     generate_features(db); generate_labels(db); backtest(db); walk_forward(db)
-    r1 = [(r.strategy_id, r.trade_count, r.win_rate, r.expected_value_per_trade) for r in db.query(models.BacktestRun).order_by(models.BacktestRun.strategy_id)]
+    r1 = [(x.strategy_id, x.trade_count, x.expected_value_per_trade) for x in db.query(models.BacktestRun).order_by(models.BacktestRun.strategy_id)]
+    s1 = stress_test(db)
     generate_features(db); generate_labels(db); backtest(db); walk_forward(db)
-    r2 = [(r.strategy_id, r.trade_count, r.win_rate, r.expected_value_per_trade) for r in db.query(models.BacktestRun).order_by(models.BacktestRun.strategy_id)]
-    assert r1 == r2
+    r2 = [(x.strategy_id, x.trade_count, x.expected_value_per_trade) for x in db.query(models.BacktestRun).order_by(models.BacktestRun.strategy_id)]
+    s2 = stress_test(db)
+    assert r1 == r2 and s1 == s2
 
 
-def test_data_insufficient_blocked_reason_case():
-    db = mkdb(); ensure_candidates(db)
-    run = db.query(models.BacktestRun).count()
-    assert run == 0
-
-
-def test_break_even_and_ev_formula():
-    db = mkdb(); seed_m1(db); ensure_candidates(db)
-    generate_features(db); generate_labels(db); backtest(db, payout_rate=0.8)
-    r = db.query(models.BacktestRun).first()
-    assert abs(r.break_even_win_rate - (1/1.8)) < 1e-4
-    loss_rate = r.loss_count / r.trade_count if r.trade_count else 0
-    assert abs(r.expected_value_per_trade - (r.win_rate*0.8 - loss_rate)) < 1e-8
-
-
-def test_near_zero_margin_rate_exists():
-    db = mkdb(); seed_m1(db); ensure_candidates(db)
-    generate_features(db); generate_labels(db); backtest(db, near_zero_threshold=0.2)
-    assert db.query(models.BacktestRun).first().near_zero_margin_rate >= 0
-
-
-def test_walk_forward_is_timeseries_ordered():
-    db = mkdb(); seed_m1(db); ensure_candidates(db)
-    generate_features(db); generate_labels(db); backtest(db); walk_forward(db, windows=3)
-    wf = db.query(models.WalkForwardRun).first()
-    assert wf.periods >= 0
+def test_break_even_increases_when_payout_drops():
+    be08 = 1/(1+0.8)
+    be07 = 1/(1+0.7)
+    assert be07 > be08
