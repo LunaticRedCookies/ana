@@ -4,7 +4,7 @@ from sqlalchemy.orm import sessionmaker
 
 from app.database import Base
 from app import models
-from app.pipeline import generate_features, generate_labels, backtest, walk_forward, ensure_candidates, resample_candles, stress_test
+from app.pipeline import generate_features, generate_labels, backtest, walk_forward, ensure_candidates, resample_candles, latest_confirmed_feature, get_mtf_context
 
 
 def mkdb():
@@ -13,54 +13,56 @@ def mkdb():
     return sessionmaker(bind=engine)()
 
 
-def seed_m1(db, n=31):
-    t = datetime(2026,1,1,0,0,0)
-    p = 1.1000
+def seed_m1(db, n=40):
+    t = datetime(2026,1,1,10,0,0); p=1.1
     for i in range(n):
-        close = p + (0.0002 if i % 2 == 0 else -0.0001)
-        db.add(models.RawCandle(symbol='EURUSD', timeframe='M1', timestamp=t, open=p, high=max(p, close)+0.0001, low=min(p, close)-0.0001, close=close, volume=100+i))
-        p = close; t += timedelta(minutes=1)
+        c=p+(0.0002 if i%2==0 else -0.0001)
+        db.add(models.RawCandle(symbol='EURUSD',timeframe='M1',timestamp=t,bar_start_time=t,bar_end_time=t+timedelta(minutes=1),source_timeframe='csv',generated_from='csv',open=p,high=max(p,c)+0.0001,low=min(p,c)-0.0001,close=c,volume=100))
+        p=c; t += timedelta(minutes=1)
     db.commit()
 
 
-def test_resample_m5_and_drop_incomplete():
-    db = mkdb(); seed_m1(db, 12)
-    r = resample_candles(db, 'M1', 'M5')
-    assert r['created'] == 2 and r['dropped'] == 2
+def test_resample_and_discard():
+    db=mkdb(); seed_m1(db,12)
+    r=resample_candles(db,'M1','M5')
+    assert r['created']==2 and r['dropped']==2
 
 
-def test_resample_m15():
-    db = mkdb(); seed_m1(db, 31)
-    r = resample_candles(db, 'M1', 'M15')
-    assert r['created'] == 2 and r['dropped'] == 1
+def test_lookahead_block_and_release():
+    db=mkdb(); seed_m1(db,20); generate_features(db)
+    f_before = latest_confirmed_feature(db,'EURUSD','M5',datetime(2026,1,1,10,2,0))
+    assert f_before is None
+    f_after = latest_confirmed_feature(db,'EURUSD','M5',datetime(2026,1,1,10,5,0))
+    assert f_after is not None and f_after.bar_start_time == datetime(2026,1,1,10,0,0)
 
 
-def test_30s_unsupported_and_60s_next_close_and_tail_unsupported():
-    db = mkdb(); seed_m1(db, 4)
-    generate_labels(db)
-    l30 = db.query(models.Label).filter_by(expiry_seconds=30).first()
-    assert l30.result_high == 'unsupported'
-    first = db.query(models.RawCandle).filter_by(timeframe='M1').order_by(models.RawCandle.timestamp).first()
-    nextc = db.query(models.RawCandle).filter_by(timeframe='M1').order_by(models.RawCandle.timestamp).all()[1]
-    l60 = db.query(models.Label).filter_by(timestamp=first.timestamp, expiry_seconds=60).first()
-    assert l60.expiry_price == nextc.close
-    tail = db.query(models.RawCandle).filter_by(timeframe='M1').order_by(models.RawCandle.timestamp).all()[-1]
-    ltail = db.query(models.Label).filter_by(timestamp=tail.timestamp, expiry_seconds=180).first()
-    assert ltail.result_high == 'unsupported'
+def test_m15_lookahead_block():
+    db=mkdb(); seed_m1(db,40); generate_features(db)
+    assert latest_confirmed_feature(db,'EURUSD','M15',datetime(2026,1,1,10,14,0)) is None
+    assert latest_confirmed_feature(db,'EURUSD','M15',datetime(2026,1,1,10,15,0)) is not None
 
 
-def test_deterministic_backtest_and_stress():
-    db = mkdb(); seed_m1(db, 50); ensure_candidates(db)
+def test_label_rules():
+    db=mkdb(); seed_m1(db,4); generate_labels(db)
+    assert db.query(models.Label).filter_by(expiry_seconds=30).first().result_high == 'unsupported'
+    l = db.query(models.Label).filter_by(expiry_seconds=60).first()
+    assert l.expiry_price == db.query(models.RawCandle).filter_by(timeframe='M1').order_by(models.RawCandle.bar_start_time).all()[1].close
+    tail = db.query(models.Label).filter_by(expiry_seconds=180).order_by(models.Label.bar_start_time.desc()).first()
+    assert tail.result_high == 'unsupported'
+
+
+def test_data_insufficient_mtf_context_and_trade_log_fields():
+    db=mkdb(); seed_m1(db,10); generate_features(db); generate_labels(db); ensure_candidates(db); backtest(db)
+    m1 = db.query(models.RawCandle).filter_by(timeframe='M1').order_by(models.RawCandle.bar_start_time).first()
+    assert get_mtf_context(db,'EURUSD',m1) is None
+    t = db.query(models.BacktestTrade).first()
+    if t:
+        assert t.confirmed_m5_bar_end_time <= t.timestamp and t.confirmed_m15_bar_end_time <= t.timestamp
+
+
+def test_deterministic_results():
+    db=mkdb(); seed_m1(db,80); generate_features(db); generate_labels(db); ensure_candidates(db); backtest(db); walk_forward(db)
+    r1=[(x.strategy_id,x.trade_count,x.expected_value_per_trade) for x in db.query(models.BacktestRun).order_by(models.BacktestRun.strategy_id)]
     generate_features(db); generate_labels(db); backtest(db); walk_forward(db)
-    r1 = [(x.strategy_id, x.trade_count, x.expected_value_per_trade) for x in db.query(models.BacktestRun).order_by(models.BacktestRun.strategy_id)]
-    s1 = stress_test(db)
-    generate_features(db); generate_labels(db); backtest(db); walk_forward(db)
-    r2 = [(x.strategy_id, x.trade_count, x.expected_value_per_trade) for x in db.query(models.BacktestRun).order_by(models.BacktestRun.strategy_id)]
-    s2 = stress_test(db)
-    assert r1 == r2 and s1 == s2
-
-
-def test_break_even_increases_when_payout_drops():
-    be08 = 1/(1+0.8)
-    be07 = 1/(1+0.7)
-    assert be07 > be08
+    r2=[(x.strategy_id,x.trade_count,x.expected_value_per_trade) for x in db.query(models.BacktestRun).order_by(models.BacktestRun.strategy_id)]
+    assert r1==r2

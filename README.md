@@ -1,28 +1,22 @@
 # Edge Discovery Bot
 
-このシステムは、戦略候補を生成・検証し、条件を満たすものだけを候補として扱う研究支援アプリです。Bubingaへのログイン、自動クリック、自動発注、画面スクレイピングは実装していません。
+timestamp は bar_start_time（足の開始時刻）として扱います。bar_end_time は足の確定時刻です。M5 は start+5分、M15 は start+15分です。
 
-CSVの必須カラムは `symbol,timeframe,timestamp,open,high,low,close,volume` です。
+M1判定で上位足を参照するときは、`upper_feature.bar_end_time <= m1.bar_start_time` を満たす確定足だけを使います。これにより、未確定M5/M15の close/high/low を参照しない方針です。
 
-M1しかないCSVでは、`/v1/research/resample` で M5 と M15 を決定論的に生成します。仕様は、open=期間先頭、high/low=期間内極値、close=期間末尾、volume=期間合計、timestamp=期間開始時刻、不完全期間は破棄です。
+M1からM5/M15のリサンプリングは `/v1/research/resample` で実行できます。open は先頭、high/low は期間内極値、close は末尾、volume は合計です。不完全バケットは破棄し、作成数と破棄数を結果で返します。
 
-特徴量生成では、M1判定に対して直近で確定済みの M5/M15 特徴量だけを参照します。未確定上位足を使わないことで lookahead bias を避けます。
+ラベル生成では1分足CSVの30秒満期を unsupported にします。60秒満期は次の1分足closeを使う近似で、実際のBubinga満期判定を完全再現するものではありません。
 
-ラベル生成で1分足を使う場合、30秒満期は unsupported として保存します。60秒満期は次の1分足closeを使う近似です。これは実際のBubinga判定を完全再現するものではありません。
+戦略条件DSLは eval を使わず比較関数で評価します。対応演算子は `==`, `!=`, `>`, `>=`, `<`, `<=`, `in`, `not in` です。例: `trend_m15 == "up" && atr_percentile >= 0.3`。
 
-`/v1/research/monte-carlo` は、ランダムではなく決定論的ストレス検証を返します。最悪順序のドローダウン、payout率低下シナリオの期待値を計算します。
+候補生成は方向・満期・トレンド条件の組み合わせで生成します。backtest trade log には、参照した M5/M15 の bar_start_time/bar_end_time を保存し、後から未来参照の有無を検証できます。
 
-active strategy が0の状態は正常系です。その場合 `/v1/signals/latest` は `no_active_strategy` を返します。
+lookahead bias テストでは、10:00-10:05のM5足が 10:02 では参照不可、10:05以降で参照可になることを確認します。
 
-Linux/macOS:
+active strategy が0は正常です。`/v1/signals/latest` は `no_active_strategy` を返します。
+
 ```bash
-python -m pip install -r requirements.txt
-pytest -q
-uvicorn app.main:app --reload
-```
-
-Windows PowerShell:
-```powershell
 python -m pip install -r requirements.txt
 pytest -q
 uvicorn app.main:app --reload

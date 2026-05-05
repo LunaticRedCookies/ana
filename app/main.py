@@ -2,7 +2,7 @@ from fastapi import Depends, FastAPI
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 import csv, io
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from .database import Base, engine, get_db
 from . import models
@@ -19,7 +19,7 @@ class CSVIn(BaseModel):
 @app.post('/v1/import/csv')
 def import_csv(payload: CSVIn, db: Session = Depends(get_db)):
     for r in csv.DictReader(io.StringIO(payload.content)):
-        db.add(models.RawCandle(symbol=r['symbol'], timeframe=r['timeframe'], timestamp=datetime.fromisoformat(r['timestamp']), open=float(r['open']), high=float(r['high']), low=float(r['low']), close=float(r['close']), volume=float(r['volume'])))
+        ts=datetime.fromisoformat(r['timestamp']); tf=r['timeframe']; mins=1 if tf=='M1' else 5 if tf=='M5' else 15; db.add(models.RawCandle(symbol=r['symbol'], timeframe=tf, timestamp=ts, bar_start_time=ts, bar_end_time=ts+timedelta(minutes=mins), source_timeframe='csv', generated_from='csv', open=float(r['open']), high=float(r['high']), low=float(r['low']), close=float(r['close']), volume=float(r['volume'])))
     db.commit(); return {"status": "imported"}
 
 @app.post('/v1/research/resample')
